@@ -1,0 +1,6 @@
+[submodule "lib/libmodbus"]
+	path = lib/libmodbus
+	url = https://github.com/stephane/libmodbus
+[submodule "lib/spdlog"]
+	path = lib/spdlog
+	url = https://github.com/gabime/spdlog
