@@ -1,0 +1,43 @@
+{
+	"cmd4Offset": 30001,
+	"cmd3Offset": 0,
+	"addresses": {
+		"1": {
+			"0": {
+				"type": 2,
+				"command": 3,
+				"initialValue": 2.0
+			},
+			"30005": {
+				"type": 2,
+				"command": 4,
+				"initialValue": 3.0
+			},
+			"30013": {
+				"type": 2,
+				"command": 4,
+				"initialValue": 4.0
+			},
+			"30007": {
+				"type": 2,
+				"command": 4,
+				"initialValue": 5.0
+			},
+			"30015": {
+				"type": 2,
+				"command": 4,
+				"initialValue": 6.0
+			},
+			"30009": {
+				"type": 2,
+				"command": 4,
+				"initialValue": 9.0
+			},
+			"30011": {
+				"type": 2,
+				"command": 4,
+				"initialValue": 10.0
+			}
+		}
+	}
+}

@@ -1,212 +1,165 @@
-#include "modbus.h"
+#include <iostream>
+#include <signal.h>
+
 #include "spdlog/spdlog.h"
 
-int main(int argc, char *argv[])
+#include "modbusmap.h"
+#include "modbusdata.h"
+
+#define MODBUS_MAP_DEFAULT "modbusmap.json"
+#define DATABASE_FILE_DEFAULT "database.db"
+
+typedef enum {
+    RTU,
+    TCP
+} ConnectionType;
+
+static void usage() {
+    std::cout << "Usage: ftp_client [options]" << std::endl;
+    std::cout << "Options:" << std::endl;
+    std::cout << "  -d: debug mode" << std::endl;
+    std::cout << "  -L <file>: save log to file" << std::endl;
+    std::cout << "  -t: set connection type to TCP" << std::endl;
+    std::cout << "  -r: set connection type to RTU" << std::endl;
+    std::cout << "  -m <file>: set MODBUS map file" << std::endl;
+    std::cout << "  -D <file>: set database file" << std::endl;
+    std::cout << "  -h: help" << std::endl;
+}
+
+static void handle_signal(int sig)
 {
-    modbus_t *mbCtx;
-    modbus_mapping_t *mb_mapping;
-    uint8_t *query;
-    int header_length;
-    int slaveList[5] = { 1, 3, 4, 5, 6 };
-    float f = 1.0;
-    int i;
-    int rc;
-    int requested_address;
-    const uint16_t UT_REGISTERS_ADDRESS = 0;
-    const uint16_t UT_REGISTERS_NB_MAX = 15;
-    const uint16_t UT_INPUT_REGISTERS_ADDRESS = 30000;
-    const uint16_t UT_INPUT_REGISTERS_NB = 100;
-    uint16_t UT_INPUT_REGISTERS_TAB[300] = { 0 };
+	if (sig == SIGINT || sig == SIGTERM || sig == SIGQUIT) {
+      exit(1);
+	} else if (sig == SIGHUP) {
+		/* do nothing */
+	} else if (sig == SIGPIPE) {
+		/* do nothing */
+	} else if (sig == SIGUSR1) {
+		// _want_snaps = !_want_snaps;
+	}
+}
 
-    union double_v {
-        double d;
-        uint16_t v[4];
-    };
-    union double_v val_d;
+static void setupSignal() {
+  struct sigaction sigact;
+	sigemptyset(&sigact.sa_mask);
+	sigact.sa_handler = handle_signal;
+	sigact.sa_flags = 0;
+	sigaction(SIGINT, &sigact, nullptr);
+	sigaction(SIGTERM, &sigact, nullptr);
+	sigaction(SIGHUP, &sigact, nullptr);
+	sigaction(SIGPIPE, &sigact, nullptr);
+	sigaction(SIGQUIT, &sigact, nullptr);
+	sigaction(SIGUSR1, &sigact, nullptr);
+}
 
-    union float_v {
-        float d;
-        uint16_t v[2];
-    };
-    union float_v val_f;
+static void setupDatabase(std::string databaseFile, std::string modbusMapFile) {
+    spdlog::info("Setting up database");
+    spdlog::info("Database file: {}", databaseFile);
+    spdlog::info("Modbus map file: {}", modbusMapFile);
 
-    union int_v {
-        uint32_t i;
-        uint16_t v[2];
-    };
-    union int_v val_i;
+    ModbusMap modbusMap(modbusMapFile);
+    auto map = modbusMap.getMap();
+    auto cmd3Offset = modbusMap.getCmd3Offset();
+    auto cmd4Offset = modbusMap.getCmd4Offset();
 
-    spdlog::debug("Starting stand-alone testing");
+    auto storage = ModbusData::initStorage(databaseFile);
 
-    mbCtx = modbus_new_rtu("COM1",9600,'N',8,2);
-    query = (uint8_t*)malloc(MODBUS_RTU_MAX_ADU_LENGTH);
-    header_length = modbus_get_header_length(mbCtx);
-
-    // modbus_set_slave_list(mbCtx,slaveList, (sizeof(slaveList)/sizeof(int)));
-    modbus_set_slave(mbCtx,1);
-    modbus_set_debug(mbCtx, true);
-
-    spdlog::debug("Address mapping");
-
-    UT_INPUT_REGISTERS_TAB[0] = 0x5678;
-    UT_INPUT_REGISTERS_TAB[1] = 0x3210;
-    f = 1.1;
-    for (i=2;i<102;i+=2) {
-        modbus_set_float_abcd(f,&UT_INPUT_REGISTERS_TAB[i]);
-        f *= 2;
-    }
-
-    for(i=0;i<119;i++) {
-        UT_INPUT_REGISTERS_TAB[102+i] = i;
-    }
-
-    mb_mapping = modbus_mapping_new_start_address(
-                /* UT_BITS_ADDRESS */0, /* UT_BITS_NB */0,
-                /* UT_INPUT_BITS_ADDRESS */0, /* UT_INPUT_BITS_NB */0,
-                UT_REGISTERS_ADDRESS, UT_REGISTERS_NB_MAX,
-                UT_INPUT_REGISTERS_ADDRESS, UT_INPUT_REGISTERS_NB);
-    if (mb_mapping == NULL) {
-        spdlog::error("Failed to allocate the mapping: {}\n",
-                modbus_strerror(errno));
-        modbus_free(mbCtx);
-        return -1;
-    }
-
-    /* Initialize values of INPUT REGISTERS */
-    for (i=0; i < UT_INPUT_REGISTERS_NB; i++) {
-        mb_mapping->tab_input_registers[i] = UT_INPUT_REGISTERS_TAB[i];
-    }
-
-    spdlog::debug("Connecting");
-
-    rc = modbus_connect(mbCtx);
-    if (rc == -1) {
-        spdlog::error("Unable to connect {}\n", modbus_strerror(errno));
-        modbus_free(mbCtx);
-        return -1;
-    }
-
-    spdlog::debug("Waiting for messages");
-
-    header_length = modbus_get_header_length(mbCtx);
-    for(;;) {
-        do {
-            rc = modbus_receive(mbCtx, query);
-            /* Filtered queries return 0 */
-        } while (rc == 0);
-
-        /* The connection is not closed on errors which require on reply such as
-                   bad CRC in RTU. */
-        if (rc == -1 && errno != EMBBADCRC) {
-            /* Quit */
-            break;
-        }
-
-        if (query[header_length] == 0x03) {
-            /* Read Registers - o caso configurado */
-            requested_address = MODBUS_GET_INT16_FROM_INT8(query,header_length+1);
-            printf("CMD3 (Holding registers): requested_address = %d\n",requested_address);
-
-            val_d.d = 0.2345;
-            mb_mapping->tab_registers[0] = val_d.v[0];
-            mb_mapping->tab_registers[1] = val_d.v[1];
-            mb_mapping->tab_registers[2] = val_d.v[2];
-            mb_mapping->tab_registers[3] = val_d.v[3];
-
-            val_d.d = 15.4521;
-            mb_mapping->tab_registers[4] = val_d.v[0];
-            mb_mapping->tab_registers[5] = val_d.v[1];
-            mb_mapping->tab_registers[6] = val_d.v[2];
-            mb_mapping->tab_registers[7] = val_d.v[3];
-
-            val_d.d = 7.1234;
-            mb_mapping->tab_registers[8] = val_d.v[0];
-            mb_mapping->tab_registers[9] = val_d.v[1];
-            mb_mapping->tab_registers[10] = val_d.v[2];
-            mb_mapping->tab_registers[11] = val_d.v[3];
-
-            val_i.i = 128900;
-            mb_mapping->tab_registers[12] = val_i.v[0];
-            mb_mapping->tab_registers[13] = val_i.v[1];
-        }
-
-        if (query[header_length] == 0x04) {
-            /* Input Registers - o caso configurado */
-            requested_address = MODBUS_GET_INT16_FROM_INT8(query,header_length+1);
-            printf("CMD4 (Input registers): requested_address = %d\n",requested_address);
-
-            /* NS */
-            val_i.i = 123456;
-            mb_mapping->tab_input_registers[1] = val_i.v[0];
-            mb_mapping->tab_input_registers[2] = val_i.v[1];
-
-            /* U0 */
-            modbus_set_float_abcd(15.89,&mb_mapping->tab_input_registers[3]);
-            //val_f.d = 15.89;
-            //mb_mapping->tab_input_registers[3] = val_f.v[0];
-            //mb_mapping->tab_input_registers[4] = val_f.v[1];
-
-            /* I0 */
-            val_f.d = 25.89;
-            mb_mapping->tab_input_registers[5] = val_f.v[0];
-            mb_mapping->tab_input_registers[6] = val_f.v[1];
-
-            /* FP */
-            val_f.d = 150.89;
-            mb_mapping->tab_input_registers[7] = val_f.v[0];
-            mb_mapping->tab_input_registers[8] = val_f.v[1];
-
-            /* S0 */
-            val_f.d = 1115.89;
-            mb_mapping->tab_input_registers[9] = val_f.v[0];
-            mb_mapping->tab_input_registers[10] = val_f.v[1];
-
-            /* Q0 */
-            val_f.d = 190.89;
-            mb_mapping->tab_input_registers[11] = val_f.v[0];
-            mb_mapping->tab_input_registers[12] = val_f.v[1];
-
-            /* P0 */
-            val_f.d = 999.89;
-            mb_mapping->tab_input_registers[13] = val_f.v[0];
-            mb_mapping->tab_input_registers[14] = val_f.v[1];
-
-            /* F */
-            val_f.d = 1024.89;
-            mb_mapping->tab_input_registers[15] = val_f.v[0];
-            mb_mapping->tab_input_registers[16] = val_f.v[1];
-
-            /* EA+ */
-            val_f.d = 0.8999;
-            mb_mapping->tab_input_registers[53] = val_f.v[0];
-            mb_mapping->tab_input_registers[54] = val_f.v[1];
-
-            /* ER+ */
-            val_f.d = 1.8999;
-            mb_mapping->tab_input_registers[55] = val_f.v[0];
-            mb_mapping->tab_input_registers[56] = val_f.v[1];
-
-            /* DA */
-            val_f.d = 450.8999;
-            mb_mapping->tab_input_registers[63] = val_f.v[0];
-            mb_mapping->tab_input_registers[64] = val_f.v[1];
-        }
-
-        rc = modbus_reply(mbCtx, query, rc, mb_mapping);
-        if (rc == -1) {
-            break;
+    for (auto& [slaveId, registers] : map) {
+        spdlog::info("Slave id: {}", slaveId);
+        for (auto& [registerId, modbusRegister] : registers) {
+            spdlog::info("Register id: {}", registerId);
+            spdlog::info("Register type: {}", modbusRegister.type);
+            // Adding to the database
+            ModbusData modbusData;
+            modbusData.slaveId = slaveId;
+            modbusData.address = registerId;
+            modbusData.command = modbusRegister.command;
+            if (modbusRegister.command == 3) {
+                modbusData.address += cmd3Offset;
+            }
+            else if (modbusRegister.command == 4) {
+                modbusData.address += cmd4Offset;
+            }
+            else {
+                spdlog::error("Invalid command: {}", modbusRegister.command);
+                continue;
+            }
+            modbusData.type = modbusRegister.type;
+            if (modbusRegister.type == ModbusRegister::MODBUS_TYPE_FLOAT) {
+                modbusData.value = modbusRegister.value.valf[0];
+            }
+            else if (modbusRegister.type == ModbusRegister::MODBUS_TYPE_UINT32) {
+                modbusData.value = modbusRegister.value.val32[0];
+            }
+            else if (modbusRegister.type == ModbusRegister::MODBUS_TYPE_UINT16) {
+                modbusData.value = modbusRegister.value.val16[0];
+            }
+            else {
+                spdlog::error("Invalid register type: {}", modbusRegister.type);
+                continue;
+            }
+            try {
+                storage.insert(modbusData);
+                spdlog::info("Data inserted to database");
+            }
+            catch (std::system_error& e) {
+                spdlog::error("Error inserting data to database: {}", e.what());
+            }
         }
     }
+}
 
-    spdlog::info("End the loop");
+int main(int argc, char *argv[]) {
+    // Handle the signals to finish correctly the program
+    setupSignal();
 
-    modbus_mapping_free(mb_mapping);
-    free(query);
-    /* For RTU */
-    modbus_close(mbCtx);
-    modbus_free(mbCtx);
+    // Setup log
+    spdlog::set_level(spdlog::level::info);
+    spdlog::set_pattern("[%H:%M:%S.%e] [%^%l%$] [thread %t] %v");
 
-    spdlog::info("Ending stand-alone testing");
+    std::string modbusMapFile = MODBUS_MAP_DEFAULT;
+    std::string databaseFile = DATABASE_FILE_DEFAULT;
+    ConnectionType connectionMode = TCP;
+    bool isSetupDatabase = false;
+    int opt;
+	while ((opt = getopt(argc, argv, "dL:trm:D:h")) != -1) {
+		switch (opt) {
+            case 'd':
+			    spdlog::set_level(spdlog::level::debug);
+                spdlog::debug("Debug mode enabled");
+			    break;
+            case 'L':
+                // Save log to file
+                spdlog::info("Saving log to file {}",optarg);
+                // Not yet available
+                break;
+            case 't':
+                spdlog::info("Setting connection type to TCP");
+                connectionMode = TCP;
+                break;
+            case 'r':
+                spdlog::info("Setting connection type to RTU");
+                connectionMode = RTU;
+                break;
+            case 'm':
+                spdlog::info("Setting MODBUS map from file {}", optarg);
+                modbusMapFile = optarg;
+                isSetupDatabase = true;
+                break;
+            case 'D':
+                spdlog::info("Setting database file to {}", optarg);
+                databaseFile = optarg;
+                break;
+            case 'h':
+                usage();
+                return 0;
+		default:
+			break;
+		}
+	}
 
-    return 0;
+    if (isSetupDatabase == true) {
+        setupDatabase(databaseFile, modbusMapFile);
+    }
+
 }
